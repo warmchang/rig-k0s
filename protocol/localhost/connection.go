@@ -81,7 +81,17 @@ func (c *Connection) command(ctx context.Context, cmd string) *exec.Cmd {
 }
 
 // ExecInteractive executes a command on the host and passes stdin/stdout/stderr as-is to the session.
-func (c *Connection) ExecInteractive(cmd string, stdin io.Reader, stdout, stderr io.Writer) error { //nolint:cyclop
+// The process is killed when ctx is cancelled. Nil streams default to os.Stdin/os.Stdout/os.Stderr.
+func (c *Connection) ExecInteractive(ctx context.Context, cmd string, stdin io.Reader, stdout, stderr io.Writer) error { //nolint:cyclop
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	if cmd == "" {
 		cmd = os.Getenv("SHELL") + " -l"
 	}
@@ -152,7 +162,22 @@ func (c *Connection) ExecInteractive(cmd string, stdin io.Reader, stdout, stderr
 		return fmt.Errorf("failed to start process: %w", err)
 	}
 
+	// Kill the process when the context is done, but also stop watching when
+	// the function returns normally so that the goroutine does not leak.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = proc.Kill()
+		case <-watchDone:
+		}
+	}()
+
 	if _, err := proc.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err() //nolint:wrapcheck // context error is the real cause
+		}
 		return fmt.Errorf("process wait: %w", err)
 	}
 	return nil

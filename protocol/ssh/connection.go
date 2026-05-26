@@ -211,14 +211,13 @@ func (c *Connection) Disconnect() {
 	c.disconnect()
 }
 
-// IsWindows is true when the host is running windows.
-func (c *Connection) IsWindows() bool {
+// detectWindows probes the remote host to determine whether it is running
+// Windows and stores the result in the cache. The caller is responsible for
+// ensuring the connection is established before calling this method.
+// If called concurrently, the probe may run more than once, but the cached
+// result is always consistent.
+func (c *Connection) detectWindows(ctx context.Context) bool {
 	c.mu.Lock()
-	if c.isWindows != nil {
-		result := *c.isWindows
-		c.mu.Unlock()
-		return result
-	}
 	client := c.client
 	c.mu.Unlock()
 
@@ -227,7 +226,7 @@ func (c *Connection) IsWindows() bool {
 	}
 
 	serverVersion := strings.ToLower(string(client.ServerVersion()))
-	log.Trace(context.Background(), "checking if host is windows", "server_version", serverVersion)
+	log.Trace(ctx, "checking if host is windows", "server_version", serverVersion)
 
 	boolPtr := func(b bool) *bool { return &b }
 	var isWin bool
@@ -237,20 +236,42 @@ func (c *Connection) IsWindows() bool {
 	case isKnownPosix(serverVersion):
 		isWin = false
 	default:
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
 		isWinProc, err := c.StartProcess(ctx, "ver.exe", nil, nil, nil)
 		isWin = err == nil && isWinProc.Wait() == nil
+		// Don't cache a probe that failed due to context cancellation — the
+		// result would be a false negative that persists for the lifetime of
+		// the connection.
+		if ctx.Err() != nil {
+			return false
+		}
 	}
 
-	log.Trace(context.Background(), fmt.Sprintf("host is windows: %t", isWin))
+	log.Trace(ctx, fmt.Sprintf("host is windows: %t", isWin))
 
 	c.mu.Lock()
 	c.isWindows = boolPtr(isWin)
 	c.mu.Unlock()
 
 	return isWin
+}
+
+// IsWindows is true when the host is running windows.
+// The result is cached after the first probe; subsequent calls are O(1).
+// For reliable context propagation, Connect should be called first —
+// detection is also triggered during Connect using the connect context.
+func (c *Connection) IsWindows() bool {
+	c.mu.Lock()
+	if c.isWindows != nil {
+		result := *c.isWindows
+		c.mu.Unlock()
+		return result
+	}
+	c.mu.Unlock()
+
+	// Fallback: probe with a bounded background context.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return c.detectWindows(ctx)
 }
 
 func knownhostsCallback(path string, permissive, hash bool) (ssh.HostKeyCallback, error) {
@@ -438,7 +459,22 @@ func (c *Connection) connectViaBastion(ctx context.Context, dst string, config *
 	c.startKeepalive()
 	c.mu.Unlock()
 
+	c.prewarmWindows(ctx)
+
 	return nil
+}
+
+// prewarmWindows calls detectWindows with a short bounded context derived from
+// ctx so that Connect does not block indefinitely on the OS probe. A cancelled
+// or expired ctx causes the probe to be skipped entirely, leaving the cache
+// empty (IsWindows will probe on first call instead).
+func (c *Connection) prewarmWindows(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c.detectWindows(probeCtx)
 }
 
 // startKeepalive starts the keepalive goroutine. Caller must hold c.mu.
@@ -496,6 +532,8 @@ func (c *Connection) Connect(ctx context.Context) error {
 	c.client = ssh.NewClient(ncc, chans, reqs)
 	c.startKeepalive()
 	c.mu.Unlock()
+
+	c.prewarmWindows(ctx)
 
 	return nil
 }
@@ -616,8 +654,69 @@ func (c *Connection) StartProcess(ctx context.Context, cmd string, stdin io.Read
 	return session, nil
 }
 
+// setupInteractivePTY configures a PTY on the session for a file-backed stdin
+// and returns the raw-mode restore function. It sets the local terminal to raw
+// mode so that keystrokes are forwarded unmodified.
+func setupInteractivePTY(session *ssh.Session, inF *os.File) (func(), error) {
+	stdinFD := int(inF.Fd())
+	old, err := term.MakeRaw(stdinFD)
+	if err != nil {
+		return nil, fmt.Errorf("make local terminal raw: %w", err)
+	}
+
+	width, height, err := term.GetSize(stdinFD)
+	if err != nil {
+		_ = term.Restore(stdinFD, old)
+		return nil, fmt.Errorf("get terminal size: %w", err)
+	}
+
+	modes := ssh.TerminalModes{ssh.ECHO: 1}
+	if err := session.RequestPty("xterm", height, width, modes); err != nil {
+		_ = term.Restore(stdinFD, old)
+		return nil, fmt.Errorf("request pty: %w", err)
+	}
+
+	return func() { _ = term.Restore(stdinFD, old) }, nil
+}
+
+// prepareSessionInput wires stdin to the session. If stdin is a terminal
+// *os.File a PTY is requested and a raw-mode restore function is returned;
+// otherwise the reader is used as-is and the restore is a no-op.
+func prepareSessionInput(session *ssh.Session, stdin io.Reader) (input io.Reader, restore func(), err error) {
+	restore = func() {}
+	inF, ok := stdin.(*os.File)
+	if !ok {
+		return stdin, restore, nil
+	}
+	if term.IsTerminal(int(inF.Fd())) {
+		restore, err = setupInteractivePTY(session, inF)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return inF, restore, nil
+}
+
+// defaultInteractiveStreams replaces nil streams with the process's standard
+// streams so that callers can safely pass nil for any stream they don't need
+// to redirect.
+func defaultInteractiveStreams(stdin io.Reader, stdout, stderr io.Writer) (io.Reader, io.Writer, io.Writer) {
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	return stdin, stdout, stderr
+}
+
 // ExecInteractive executes a command on the host and passes stdin/stdout/stderr as-is to the session.
-func (c *Connection) ExecInteractive(cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+// The session is closed when ctx is cancelled. Nil streams default to os.Stdin/os.Stdout/os.Stderr.
+func (c *Connection) ExecInteractive(ctx context.Context, cmd string, stdin io.Reader, stdout, stderr io.Writer) error {
+	stdin, stdout, stderr = defaultInteractiveStreams(stdin, stdout, stderr)
 	c.mu.Lock()
 	client := c.client
 	c.mu.Unlock()
@@ -630,35 +729,26 @@ func (c *Connection) ExecInteractive(cmd string, stdin io.Reader, stdout, stderr
 	}
 	defer session.Close()
 
+	// Close the session when the context is done, but also stop watching when
+	// the function returns normally so that the goroutine does not leak.
+	watchDone := make(chan struct{})
+	defer close(watchDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+		case <-watchDone:
+		}
+	}()
+
 	session.Stdout = stdout
 	session.Stderr = stderr
-	var input io.Reader
 
-	if inF, ok := stdin.(*os.File); ok {
-		fd := int(os.Stdin.Fd())
-		old, err := term.MakeRaw(fd)
-		if err != nil {
-			return fmt.Errorf("make local terminal raw: %w", err)
-		}
-
-		defer func(fd int, old *term.State) {
-			_ = term.Restore(fd, old)
-		}(fd, old)
-
-		rows, cols, err := term.GetSize(fd)
-		if err != nil {
-			return fmt.Errorf("get terminal size: %w", err)
-		}
-
-		modes := ssh.TerminalModes{ssh.ECHO: 1}
-		err = session.RequestPty("xterm", cols, rows, modes)
-		if err != nil {
-			return fmt.Errorf("request pty: %w", err)
-		}
-		input = inF
-	} else {
-		input = stdin
+	input, restoreTerm, err := prepareSessionInput(session, stdin)
+	if err != nil {
+		return err
 	}
+	defer restoreTerm()
 
 	stdinpipe, err := session.StdinPipe()
 	if err != nil {
@@ -676,12 +766,14 @@ func (c *Connection) ExecInteractive(cmd string, stdin io.Reader, stdout, stderr
 	} else {
 		err = session.Start(cmd)
 	}
-
 	if err != nil {
 		return fmt.Errorf("start ssh session: %w", err)
 	}
 
 	if err := session.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err() //nolint:wrapcheck // context error is the real cause
+		}
 		return fmt.Errorf("ssh session wait: %w", err)
 	}
 

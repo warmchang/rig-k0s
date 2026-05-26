@@ -67,25 +67,46 @@ func (c *Connection) IPAddress() string {
 	return c.Address
 }
 
-// IsWindows returns true if the remote host is windows.
-func (c *Connection) IsWindows() bool {
-	// Implement your logic here
-	if c.isWindows != nil {
-		return *c.isWindows
+// detectWindows probes the remote host to determine whether it is running
+// Windows and stores the result in the cache. The caller is responsible for
+// ensuring the connection is established before calling this method.
+func (c *Connection) detectWindows(ctx context.Context) bool {
+	isWinProc, err := c.StartProcess(ctx, "cmd.exe /c exit 0", nil, nil, nil)
+	if err != nil {
+		// Probe couldn't start (e.g. not yet connected); don't cache so a
+		// subsequent call after Connect can succeed.
+		return false
 	}
+	isWin := isWinProc.Wait() == nil
+	// Don't cache when the context was cancelled — the probe result may
+	// reflect cancellation rather than the actual remote OS.
+	if ctx.Err() != nil {
+		return false
+	}
+	c.controlMutex.Lock()
+	c.isWindows = &isWin
+	c.controlMutex.Unlock()
+	log.Trace(ctx, fmt.Sprintf("host is windows: %t", isWin), log.KeyHost, c)
+	return isWin
+}
 
-	var isWin bool
+// IsWindows returns true if the remote host is windows.
+// The result is cached after the first probe; subsequent calls are O(1).
+// For reliable context propagation, Connect should be called first —
+// detection is also triggered during Connect using the connect context.
+func (c *Connection) IsWindows() bool {
+	c.controlMutex.Lock()
+	if c.isWindows != nil {
+		result := *c.isWindows
+		c.controlMutex.Unlock()
+		return result
+	}
+	c.controlMutex.Unlock()
 
+	// Fallback: probe with a bounded background context.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	isWinProc, err := c.StartProcess(ctx, "cmd.exe /c exit 0", nil, nil, nil)
-	isWin = err == nil && isWinProc.Wait() == nil
-
-	c.isWindows = &isWin
-	log.Trace(context.Background(), fmt.Sprintf("host is windows: %t", *c.isWindows), log.KeyHost, c)
-
-	return *c.isWindows
+	return c.detectWindows(ctx)
 }
 
 // DefaultOptionArguments are the default options for the OpenSSH client.
@@ -172,11 +193,12 @@ func (c *Connection) Connect(ctx context.Context) error {
 		c.controlMutex.Lock()
 		c.isConnected = true
 		c.controlMutex.Unlock()
+		c.prewarmWindows(ctx)
 		return nil
 	}
 
-	defer c.controlMutex.Unlock()
-
+	// Multiplexing path: manage the lock explicitly so we can release it
+	// before calling detectWindows (StartProcess acquires the same lock).
 	opts := c.Options.Copy()
 	opts.Set("ControlMaster", true)
 	opts.Set("ControlPersist", 600)
@@ -194,6 +216,7 @@ func (c *Connection) Connect(ctx context.Context) error {
 	log.Trace(ctx, "starting ssh control master", log.KeyHost, c, log.KeyCommand, strings.Join(args, " "))
 	if err := cmd.Run(); err != nil {
 		c.isConnected = false
+		c.controlMutex.Unlock()
 		errOut := errBuf.String()
 		if isHostKeyError(errOut) {
 			return fmt.Errorf("%w: host key verification failed: %w (%s)", protocol.ErrNonRetryable, err, errOut)
@@ -206,8 +229,24 @@ func (c *Connection) Connect(ctx context.Context) error {
 		c.controlPath = cp
 	}
 	log.Trace(ctx, "started ssh multiplexing control master", log.KeyHost, c)
+	c.controlMutex.Unlock()
+
+	c.prewarmWindows(ctx)
 
 	return nil
+}
+
+// prewarmWindows calls detectWindows with a short bounded context derived from
+// ctx so that Connect does not block indefinitely on the OS probe. A cancelled
+// or expired ctx causes the probe to be skipped entirely, leaving the cache
+// empty (IsWindows will probe on first call instead).
+func (c *Connection) prewarmWindows(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c.detectWindows(probeCtx)
 }
 
 func (c *Connection) closeControl() error {
@@ -263,12 +302,16 @@ func (c *Connection) StartProcess(ctx context.Context, cmdStr string, stdin io.R
 }
 
 // ExecInteractive executes a command on the host and passes stdin/stdout/stderr as-is to the session.
-func (c *Connection) ExecInteractive(cmdStr string, stdin io.Reader, stdout, stderr io.Writer) error {
-	cmd, err := c.StartProcess(context.Background(), cmdStr, stdin, stdout, stderr)
+// The session is terminated when ctx is cancelled.
+func (c *Connection) ExecInteractive(ctx context.Context, cmdStr string, stdin io.Reader, stdout, stderr io.Writer) error {
+	cmd, err := c.StartProcess(ctx, cmdStr, stdin, stdout, stderr)
 	if err != nil {
 		return err
 	}
 	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err() //nolint:wrapcheck // context error is the real cause
+		}
 		return fmt.Errorf("command wait: %w", err)
 	}
 	return nil
