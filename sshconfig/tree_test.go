@@ -11,6 +11,26 @@ import (
 // TODO This file contains tests for unexported functions and structs.
 // The tests can be modified to use the exported API.
 
+// TestTokenizeRowMissingValue is a regression test for inputs that carry a key
+// but no usable value, including missing-separator forms (e.g. bare "Key") and
+// empty-value forms (e.g. "Key =" or "Key="). Before the fix these caused a
+// panic; now they must return ErrSyntax instead.
+func TestTokenizeRowMissingValue(t *testing.T) {
+	for _, input := range []string{
+		"Key =",
+		"Key=",
+		"Key = ",
+		"Key   =   ",
+		"Key",
+	} {
+		t.Run(input, func(t *testing.T) {
+			_, _, err := tokenizeRow(input)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrSyntax, "expected ErrSyntax for input %q", input)
+		})
+	}
+}
+
 func TestTreeParser(t *testing.T) {
 	for _, tc := range []struct{ name, content string }{
 		{"spaces",

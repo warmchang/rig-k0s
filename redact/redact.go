@@ -30,7 +30,13 @@ func (r noopRedacter) Writer(dst io.Writer) io.WriteCloser {
 	return noopWriteCloser{dst}
 }
 
-// StringRedacter returns a Redacter that will redact any matches of the provided strings with the provided mask.
+// StringRedacter returns a Redacter that performs best-effort redaction of the provided match strings using the
+// provided mask. Redaction is not guaranteed to be complete in all cases:
+//   - Matches where the mask contains the match string are silently dropped (replacing would immediately reintroduce the secret).
+//   - When the mask is longer than the match, only a single replacement pass is made; a replacement can re-introduce
+//     the match at a boundary (e.g. match="ab", mask="xxa", input="abb" → "xxab"), leaving a residual occurrence.
+//
+// Callers must not rely on this for guaranteed removal of sensitive data. It is intended for best-effort log redaction.
 func StringRedacter(mask string, matches ...string) Redacter {
 	if len(matches) == 0 {
 		return noopRedacter{}
@@ -40,12 +46,14 @@ func StringRedacter(mask string, matches ...string) Redacter {
 		if match == "" {
 			continue
 		}
-		for _, m := range matches {
-			if m == match {
-				continue
-			}
+		if strings.Contains(mask, match) {
+			// Replacing this match with the mask would reintroduce it; skip.
+			continue
 		}
 		newMatches = append(newMatches, match)
+	}
+	if len(newMatches) == 0 {
+		return noopRedacter{}
 	}
 	return &stringRedacter{newMatches, mask}
 }
@@ -58,6 +66,18 @@ type stringRedacter struct {
 func (r *stringRedacter) Redact(s string) string {
 	for _, match := range r.matches {
 		s = strings.ReplaceAll(s, match, r.mask)
+		if len(r.mask) > len(match) {
+			// mask longer than match: looping can re-introduce match at
+			// replacement boundaries and grow the string without bound;
+			// one pass is used. Residual occurrences are possible.
+			continue
+		}
+		// mask same length or shorter: additional passes clear boundary
+		// re-introductions. The loop is bounded by len(s) to avoid
+		// non-termination in pathological equal-length mask/match cases.
+		for i := len(s); i > 0 && strings.Contains(s, match); i-- {
+			s = strings.ReplaceAll(s, match, r.mask)
+		}
 	}
 	return s
 }
