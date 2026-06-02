@@ -40,11 +40,7 @@ func NewScanWriter(fn CallbackFn) io.WriteCloser {
 	return sw
 }
 
-// Write writes the given bytes to the scanner.
-func (w *ScanWriter) Write(p []byte) (int, error) {
-	if w.closed {
-		return 0, io.ErrUnexpectedEOF
-	}
+func (w *ScanWriter) startScanner() {
 	w.once.Do(func() {
 		go func() {
 			for w.scanner.Scan() {
@@ -53,6 +49,14 @@ func (w *ScanWriter) Write(p []byte) (int, error) {
 			close(w.closeCh)
 		}()
 	})
+}
+
+// Write writes the given bytes to the scanner.
+func (w *ScanWriter) Write(p []byte) (int, error) {
+	if w.closed {
+		return 0, io.ErrUnexpectedEOF
+	}
+	w.startScanner()
 	return w.pipeW.Write(p) //nolint:wrapcheck
 }
 
@@ -71,6 +75,11 @@ func (w *ScanWriter) CloseWithError(reason error) error {
 	if err := w.pipeW.CloseWithError(reason); err != nil {
 		return err //nolint:wrapcheck
 	}
+
+	// Ensure the scanner goroutine is running before we wait for it.
+	// If Write was never called the goroutine hasn't started yet; starting it here
+	// lets it observe the closed pipe and exit cleanly without deadlocking.
+	w.startScanner()
 
 	<-w.closeCh
 

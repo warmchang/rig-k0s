@@ -46,6 +46,11 @@ type ExecOptions struct {
 	redactStrings []string
 	decorateFuncs []DecorateFunc
 	redactMask    string
+
+	tracer        Tracer
+	traceOut      io.Writer
+	traceErr      io.Writer
+	outputClosers []io.Closer
 }
 
 // Format returns the command string with all per-call decorators applied.
@@ -132,7 +137,18 @@ func (o *ExecOptions) Stdin() io.Reader {
 }
 
 func (o *ExecOptions) logWriter(stream string, logFn func(msg string, keysAndValues ...any)) io.WriteCloser {
-	return redact.Writer(iostream.NewScanWriter(func(s string) { logFn(s, "stream", stream) }), o.redactMask, o.redactStrings...)
+	sw := iostream.NewScanWriter(func(s string) { logFn(s, "stream", stream) })
+	rw := redact.Writer(sw, o.redactMask, o.redactStrings...)
+	// rw must be closed first so it flushes its partial-match buffer into sw,
+	// then sw must be closed to signal EOF to the scanner goroutine.
+	o.outputClosers = append(o.outputClosers, rw, sw)
+	return rw
+}
+
+// OutputClosers returns a copy of the WriteClosers created by this ExecOptions that must
+// be closed after the process finishes to release their resources.
+func (o *ExecOptions) OutputClosers() []io.Closer {
+	return append([]io.Closer(nil), o.outputClosers...)
 }
 
 // Stdout returns the Stdout writer. If output logging is enabled, it will be a MultiWriter that writes to the log.
@@ -146,6 +162,9 @@ func (o *ExecOptions) Stdout() io.Writer {
 	}
 	if o.out != nil {
 		writers = append(writers, o.out)
+	}
+	if o.traceOut != nil {
+		writers = append(writers, o.traceOut)
 	}
 	return io.MultiWriter(writers...)
 }
@@ -163,7 +182,9 @@ func (o *ExecOptions) Stderr() io.Writer {
 	if o.errOut != nil {
 		writers = append(writers, o.errOut)
 	}
-
+	if o.traceErr != nil {
+		writers = append(writers, o.traceErr)
+	}
 	return io.MultiWriter(writers...)
 }
 
@@ -313,6 +334,15 @@ func Decorate(decorator DecorateFunc) ExecOption {
 func Logger(l log.Logger) ExecOption {
 	return func(o *ExecOptions) {
 		o.SetLogger(l)
+	}
+}
+
+// Trace exec option for attaching a [Tracer] to a single command execution.
+// If the Tracer also implements [OutputTracer], per-line stdout and stderr
+// hooks are enabled automatically.
+func Trace(t Tracer) ExecOption {
+	return func(o *ExecOptions) {
+		o.tracer = t
 	}
 }
 
