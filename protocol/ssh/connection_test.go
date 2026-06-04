@@ -71,7 +71,7 @@ func TestPkeySignerBatchModeSkipsEncryptedKey(t *testing.T) {
 
 	path := writeEncryptedKey(t)
 
-	_, err := c.pkeySigner(ctx, nil, path)
+	_, _, err := c.pkeySigner(ctx, nil, path)
 	require.Error(t, err)
 	require.ErrorIs(t, err, protocol.ErrNonRetryable)
 	require.NotContains(t, err.Error(), "can't parse keyfile",
@@ -89,7 +89,7 @@ func TestPkeySignerEncryptedKeyWithoutBatchModeOrCallback(t *testing.T) {
 
 	path := writeEncryptedKey(t)
 
-	_, err := c.pkeySigner(ctx, nil, path)
+	_, _, err := c.pkeySigner(ctx, nil, path)
 	require.Error(t, err)
 	require.ErrorIs(t, err, protocol.ErrNonRetryable)
 	require.ErrorIs(t, err, errSkipCache, "no-callback error must carry errSkipCache so it is not permanently cached")
@@ -107,6 +107,67 @@ func TestPkeySignerBatchModeErrorNonCacheable(t *testing.T) {
 	c.sshConfig.BatchMode = options.BooleanOption("yes")
 	path := writeEncryptedKey(t)
 
-	_, err := c.pkeySigner(ctx, nil, path)
+	_, _, err := c.pkeySigner(ctx, nil, path)
 	require.ErrorIs(t, err, errSkipCache, "batch-mode skip error must carry errSkipCache so clientConfig does not cache it")
+}
+
+// TestLoadKeySignersAgentBackedNotCached verifies that signers obtained from
+// the SSH agent (fromAgent=true) are not stored in signerCache, preventing
+// stale references after the agent connection is closed.
+func TestLoadKeySignersAgentBackedNotCached(t *testing.T) {
+	ctx := context.Background()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	sshPub, err := ssh.NewPublicKey(pub)
+	require.NoError(t, err)
+
+	sshSigner, err := ssh.NewSignerFromKey(priv)
+	require.NoError(t, err)
+
+	pubKeyFile := filepath.Join(t.TempDir(), "id_ed25519.pub")
+	require.NoError(t, os.WriteFile(pubKeyFile, ssh.MarshalAuthorizedKey(sshPub), 0o600))
+
+	signerCache.Delete(pubKeyFile)
+	t.Cleanup(func() { signerCache.Delete(pubKeyFile) })
+
+	c := newTestConnection(t)
+	c.keyPaths = []string{pubKeyFile}
+
+	signers := c.loadKeySigners(ctx, []ssh.Signer{sshSigner})
+	require.Len(t, signers, 1, "agent-backed signer must be returned")
+
+	_, cached := signerCache.Load(pubKeyFile)
+	require.False(t, cached, "agent-backed signer must not be stored in signerCache")
+}
+
+// TestClientConfigPubkeyAuthenticationDisabled verifies that when the ssh config
+// has PubkeyAuthentication set to "no", clientConfig skips all public key
+// authentication (ssh agent and identity files). With no AuthMethods provided,
+// this leaves no usable authentication method and must return a non-retryable
+// error.
+func TestClientConfigPubkeyAuthenticationDisabled(t *testing.T) {
+	// Empty SSH_KNOWN_HOSTS makes hostkeyCallback return an insecure-ignore
+	// callback, so the test does not depend on any known_hosts file on disk.
+	t.Setenv("SSH_KNOWN_HOSTS", "")
+
+	c := &Connection{
+		Config: Config{
+			Address: "127.0.0.1",
+			User:    "test",
+			Port:    22,
+		},
+		sshConfig: &sshconfig.Config{
+			PubkeyAuthentication: options.PubkeyAuthenticationOptionNo,
+		},
+		keyPaths: []string{"/some/fake/path"},
+	}
+
+	cfg, agentClose, err := c.clientConfig(context.Background())
+	agentClose()
+	require.Error(t, err)
+	require.Nil(t, cfg)
+	require.ErrorIs(t, err, protocol.ErrNonRetryable)
+	require.Contains(t, err.Error(), "no usable authentication method")
 }
