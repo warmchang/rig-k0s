@@ -63,22 +63,43 @@ func NewConnection(cfg Config, opts ...Option) (*Connection, error) {
 		User: c.User,
 		Host: c.Address,
 	}
+	c.Log().Debug("building ssh config", "user", c.User, "host", c.Address)
 
 	if c.Port != 0 && c.Port != 22 {
 		c.sshConfig.Port = c.Port
+		c.Log().Debug("propagating explicit port to ssh config", "port", c.Port)
+	} else {
+		c.Log().Debug("port is default (22) — deferring to ssh config / ~/.ssh/config", "port", c.Port)
 	}
 
 	if c.KeyPath != nil {
 		c.sshConfig.IdentityFile = []string{*c.KeyPath}
+		c.Log().Debug("propagating key path to ssh config", "key_path", *c.KeyPath)
+	}
+
+	if len(c.SSHConfigOptions) > 0 {
+		c.Log().Debug("applying options to ssh config", "count", len(c.SSHConfigOptions))
+		setter, err := sshconfig.NewSetter(c.sshConfig)
+		if err != nil {
+			return nil, fmt.Errorf("create sshconfig setter: %w", err)
+		}
+		setter.ErrorOnUnknownFields = true
+		if err := c.SSHConfigOptions.ApplyTo(setter); err != nil {
+			return nil, fmt.Errorf("%w: %w", protocol.ErrValidationFailed, err)
+		}
 	}
 
 	if ConfigParser != nil {
+		c.Log().Debug("applying ~/.ssh/config")
 		if err := ConfigParser.Apply(c.sshConfig, c.Address); err != nil {
 			return nil, fmt.Errorf("failed to apply ssh config: %w", err)
 		}
 	}
 
-	c.Port = c.sshConfig.Port
+	if c.sshConfig.Port != 0 {
+		c.Port = c.sshConfig.Port
+	}
+	c.Log().Debug("resolved final port", "port", c.Port)
 
 	// If no explicit keepalive option was provided, honor ServerAliveInterval from the ssh config.
 	// Note: platform-embedded defaults are included (e.g. macOS defaults to 30s), so a rig binary
@@ -87,6 +108,7 @@ func NewConnection(cfg Config, opts ...Option) (*Connection, error) {
 	if options.KeepAliveInterval == nil && c.sshConfig.ServerAliveInterval > 0 {
 		d := c.sshConfig.ServerAliveInterval
 		options.KeepAliveInterval = &d
+		c.Log().Debug("enabling keepalive from ssh config ServerAliveInterval", "interval", d)
 	}
 
 	return c, nil
@@ -158,7 +180,9 @@ func (c *Connection) keypathsFromConfig(ctx context.Context) []string {
 // SetDefaults sets various default values.
 func (c *Connection) SetDefaults(ctx context.Context) {
 	c.once.Do(func() {
-		c.Port = c.sshConfig.Port
+		if c.sshConfig.Port != 0 {
+			c.Port = c.sshConfig.Port
+		}
 
 		if c.sshConfig.Hostname != "" {
 			c.alias = c.Address
