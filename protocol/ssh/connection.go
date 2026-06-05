@@ -25,7 +25,10 @@ import (
 	"golang.org/x/term"
 )
 
-var errNotConnected = errors.New("not connected")
+var (
+	errNotConnected   = errors.New("not connected")
+	errNotRegularFile = errors.New("not a regular file")
+)
 
 // Connection describes an SSH connection.
 type Connection struct {
@@ -336,9 +339,17 @@ func knownhostsCallback(path string, permissive, hash bool) (ssh.HostKeyCallback
 	return cb, nil
 }
 
+func knownhostsGlobalCallback(path string, permissive bool) (ssh.HostKeyCallback, error) {
+	cb, err := hostkey.KnownHostsReadOnlyFileCallback(path, permissive)
+	if err != nil {
+		return nil, fmt.Errorf("create host key validator for %s: %w", path, err)
+	}
+	return cb, nil
+}
+
 func isPermissive(ctx context.Context, c *Connection) bool {
 	if c.sshConfig.StrictHostKeyChecking.IsFalse() {
-		log.Trace(ctx, "config StrictHostkeyChecking is set to 'no'", log.KeyHost, c)
+		log.Trace(ctx, "config StrictHostKeyChecking is set to 'no'", log.KeyHost, c)
 		return true
 	}
 
@@ -370,12 +381,16 @@ func (c *Connection) hostkeyCallback(ctx context.Context) (ssh.HostKeyCallback, 
 
 	var khPath string
 
-	for _, f := range c.sshConfig.UserKnownHostsFile {
-		log.Trace(ctx, "trying known_hosts file from ssh config", log.KeyHost, c, log.KeyFile, f)
-		exp, err := homedir.Expand(f)
-		if err == nil {
-			khPath = exp
-			break
+	// "none" anywhere in the list disables user known_hosts entirely; check
+	// the full list before committing to any path.
+	if !slices.Contains(c.sshConfig.UserKnownHostsFile, "none") {
+		for _, f := range c.sshConfig.UserKnownHostsFile {
+			log.Trace(ctx, "trying known_hosts file from ssh config", log.KeyHost, c, log.KeyFile, f)
+			exp, err := homedir.Expand(f)
+			if err == nil {
+				khPath = exp
+				break
+			}
 		}
 	}
 
@@ -384,6 +399,47 @@ func (c *Connection) hostkeyCallback(ctx context.Context) (ssh.HostKeyCallback, 
 		return knownhostsCallback(khPath, permissive, hash)
 	}
 
+	return globalKnownHostsCallback(ctx, c.sshConfig.GlobalKnownHostsFile, permissive)
+}
+
+func globalKnownHostsCallback(ctx context.Context, paths []string, permissive bool) (ssh.HostKeyCallback, error) {
+	var lastErr error
+	for _, f := range paths {
+		log.Trace(ctx, "trying global known_hosts file", log.KeyFile, f)
+		exp, err := homedir.Expand(f)
+		if err != nil {
+			lastErr = err
+			log.Trace(ctx, "skipping global known_hosts file (expand failed)", log.KeyFile, f, log.KeyError, err)
+			continue
+		}
+		if exp != "/dev/null" {
+			stat, err := os.Stat(exp)
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					lastErr = err
+				}
+				log.Trace(ctx, "skipping global known_hosts file", log.KeyFile, exp, log.KeyError, err)
+				continue
+			}
+			if !stat.Mode().IsRegular() {
+				lastErr = fmt.Errorf("%w: %s", errNotRegularFile, exp)
+				log.Trace(ctx, "skipping non-regular global known_hosts file", log.KeyFile, exp)
+				continue
+			}
+		}
+		cb, err := knownhostsGlobalCallback(exp, permissive)
+		if err != nil {
+			lastErr = err
+			log.Trace(ctx, "skipping unusable global known_hosts file", log.KeyFile, exp, log.KeyError, err)
+			continue
+		}
+		log.Trace(ctx, "using global known_hosts file", log.KeyFile, exp)
+		return cb, nil
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("%w: global known_hosts: %w", protocol.ErrNonRetryable, lastErr)
+	}
 	return nil, fmt.Errorf("%w: no known_hosts file found", protocol.ErrNonRetryable)
 }
 
