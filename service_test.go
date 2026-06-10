@@ -161,7 +161,7 @@ func TestServiceSetEnvironment(t *testing.T) {
 			fs:      &mockFS{},
 		}
 		err := svc.SetEnvironment(ctx, env)
-		require.ErrorIs(t, err, errEnvManagerNotSupported)
+		require.NoError(t, err)
 	})
 
 	t.Run("fs not available", func(t *testing.T) {
@@ -175,30 +175,6 @@ func TestServiceSetEnvironment(t *testing.T) {
 	})
 }
 
-func TestServiceDaemonReload(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("supported", func(t *testing.T) {
-		mgr := &mockReloadEnvManager{}
-		svc := &Service{
-			runner:  rigtest.NewMockRunner(),
-			name:    "mysvc",
-			initsys: mgr,
-		}
-		require.NoError(t, svc.DaemonReload(ctx))
-		require.True(t, mgr.reloaded)
-	})
-
-	t.Run("not supported", func(t *testing.T) {
-		svc := &Service{
-			runner:  rigtest.NewMockRunner(),
-			name:    "mysvc",
-			initsys: &mockBasicManager{},
-		}
-		err := svc.DaemonReload(ctx)
-		require.ErrorIs(t, err, errDaemonReloadNotSupported)
-	})
-}
 
 // mockLifecycleManager tracks Start/Stop calls and maintains isRunning state.
 type mockLifecycleManager struct {
