@@ -180,9 +180,10 @@ func (m *Service) IsRunning(ctx context.Context) bool {
 }
 
 var (
-	errLogReaderNotSupported    = errors.New("init system provider does not implement log reader")
-	errLogStreamerNotSupported  = errors.New("init system provider does not support log streaming")
-errServiceFSNotAvailable    = errors.New("service has no filesystem access; use client.Service() instead of GetService()")
+	errLogReaderNotSupported   = errors.New("init system provider does not implement log reader")
+	errLogStreamerNotSupported = errors.New("init system provider does not support log streaming")
+	errEnvManagerNotSupported  = errors.New("init system provider does not support service environment management")
+	errServiceFSNotAvailable   = errors.New("service has no filesystem access; use client.Service() instead of GetService()")
 )
 
 // Logs returns latest log lines for the service.
@@ -225,9 +226,15 @@ func (m *Service) StreamLogs(ctx context.Context, w io.Writer) error {
 func (m *Service) SetEnvironment(ctx context.Context, env map[string]string) error {
 	ctx, cancel := withServiceTimeout(ctx)
 	defer cancel()
+	if setter, ok := m.initsys.(initsystem.ServiceEnvironmentSetter); ok {
+		if err := setter.SetServiceEnvironment(ctx, m.runner, m.name, env); err != nil {
+			return fmt.Errorf("set environment for service '%s': %w", m.name, err)
+		}
+		return nil
+	}
 	envManager, ok := m.initsys.(initsystem.ServiceEnvironmentManager)
 	if !ok {
-		return nil
+		return errEnvManagerNotSupported
 	}
 	if m.fs == nil {
 		return errServiceFSNotAvailable

@@ -64,6 +64,40 @@ func (m *mockReloadEnvManager) DaemonReload(_ context.Context, _ cmd.ContextRunn
 	return nil
 }
 
+// mockEnvSetter is a ServiceManager that implements ServiceEnvironmentSetter directly.
+type mockEnvSetter struct {
+	setEnv map[string]string
+}
+
+func (m *mockEnvSetter) StartService(_ context.Context, _ cmd.ContextRunner, _ string) error {
+	return nil
+}
+
+func (m *mockEnvSetter) StopService(_ context.Context, _ cmd.ContextRunner, _ string) error {
+	return nil
+}
+
+func (m *mockEnvSetter) ServiceScriptPath(_ context.Context, _ cmd.ContextRunner, _ string) (string, error) {
+	return "", nil
+}
+
+func (m *mockEnvSetter) EnableService(_ context.Context, _ cmd.ContextRunner, _ string) error {
+	return nil
+}
+
+func (m *mockEnvSetter) DisableService(_ context.Context, _ cmd.ContextRunner, _ string) error {
+	return nil
+}
+
+func (m *mockEnvSetter) ServiceIsRunning(_ context.Context, _ cmd.ContextRunner, _ string) bool {
+	return false
+}
+
+func (m *mockEnvSetter) SetServiceEnvironment(_ context.Context, _ cmd.ContextRunner, _ string, env map[string]string) error {
+	m.setEnv = env
+	return nil
+}
+
 // mockBasicManager is a ServiceManager without env or reload support.
 type mockBasicManager struct{}
 
@@ -153,6 +187,17 @@ func TestServiceSetEnvironment(t *testing.T) {
 		require.Equal(t, "/etc/conf.d/mysvc", mfs.writtenPath)
 	})
 
+	t.Run("via setter", func(t *testing.T) {
+		mgr := &mockEnvSetter{}
+		svc := &Service{
+			runner:  rigtest.NewMockRunner(),
+			name:    "mysvc",
+			initsys: mgr,
+		}
+		require.NoError(t, svc.SetEnvironment(ctx, env))
+		require.Equal(t, env, mgr.setEnv)
+	})
+
 	t.Run("env manager not supported", func(t *testing.T) {
 		svc := &Service{
 			runner:  rigtest.NewMockRunner(),
@@ -161,7 +206,7 @@ func TestServiceSetEnvironment(t *testing.T) {
 			fs:      &mockFS{},
 		}
 		err := svc.SetEnvironment(ctx, env)
-		require.NoError(t, err)
+		require.ErrorIs(t, err, errEnvManagerNotSupported)
 	})
 
 	t.Run("fs not available", func(t *testing.T) {
