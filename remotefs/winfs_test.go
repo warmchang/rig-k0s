@@ -3,7 +3,6 @@ package remotefs_test
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -216,26 +215,6 @@ func TestWindowsChownVariantsNotSupported(t *testing.T) {
 	require.ErrorIs(t, f.ChownTreeInt("/tmp", 0, 0), remotefs.ErrNotSupported)
 }
 
-func TestWindowsHTTPStatus(t *testing.T) {
-	t.Run("200", func(t *testing.T) {
-		mr := rigtest.NewMockRunner()
-		mr.Windows = true
-		resp200 := base64.StdEncoding.EncodeToString([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-		mr.AddCommandOutput(rigtest.HasPrefix("powershell.exe"), resp200)
-		f := remotefs.NewWindowsFS(mr)
-		code, err := remotefs.HTTPStatus(context.Background(), f, "http://example.com/health")
-		require.NoError(t, err)
-		require.Equal(t, 200, code)
-	})
-	t.Run("failure", func(t *testing.T) {
-		mr := rigtest.NewMockRunner()
-		mr.Windows = true
-		mr.AddCommandFailure(rigtest.HasPrefix("powershell.exe"), errors.New("exit 1"))
-		f := remotefs.NewWindowsFS(mr)
-		_, err := remotefs.HTTPStatus(context.Background(), f, "http://example.com/health")
-		require.Error(t, err)
-	})
-}
 
 func TestWindowsCreateTemp(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {

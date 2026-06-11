@@ -99,7 +99,7 @@ func (c WinSCM) SetServiceEnvironment(ctx context.Context, runner cmd.ContextRun
 		regPath,
 		strings.Join(entries, ","),
 	)
-	if err := runner.ExecContext(ctx, script, cmd.PS()); err != nil {
+	if err := runner.ExecContext(ctx, script, cmd.PS(), cmd.Sensitive()); err != nil {
 		return fmt.Errorf("failed to set environment for service %s: %w", s, err)
 	}
 	return nil

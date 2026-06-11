@@ -230,6 +230,11 @@ func (m *Service) SetEnvironment(ctx context.Context, env map[string]string) err
 		if err := setter.SetServiceEnvironment(ctx, m.runner, m.name, env); err != nil {
 			return fmt.Errorf("set environment for service '%s': %w", m.name, err)
 		}
+		if reloader, ok := m.initsys.(initsystem.ServiceManagerReloader); ok {
+			if err := reloader.DaemonReload(ctx, m.runner); err != nil {
+				return fmt.Errorf("daemon-reload after setting environment for service '%s': %w", m.name, err)
+			}
+		}
 		return nil
 	}
 	envManager, ok := m.initsys.(initsystem.ServiceEnvironmentManager)

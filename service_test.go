@@ -69,6 +69,17 @@ type mockEnvSetter struct {
 	setEnv map[string]string
 }
 
+// mockEnvSetterReloader implements both ServiceEnvironmentSetter and ServiceManagerReloader.
+type mockEnvSetterReloader struct {
+	mockEnvSetter
+	reloaded bool
+}
+
+func (m *mockEnvSetterReloader) DaemonReload(_ context.Context, _ cmd.ContextRunner) error {
+	m.reloaded = true
+	return nil
+}
+
 func (m *mockEnvSetter) StartService(_ context.Context, _ cmd.ContextRunner, _ string) error {
 	return nil
 }
@@ -196,6 +207,18 @@ func TestServiceSetEnvironment(t *testing.T) {
 		}
 		require.NoError(t, svc.SetEnvironment(ctx, env))
 		require.Equal(t, env, mgr.setEnv)
+	})
+
+	t.Run("via setter with reloader", func(t *testing.T) {
+		mgr := &mockEnvSetterReloader{}
+		svc := &Service{
+			runner:  rigtest.NewMockRunner(),
+			name:    "mysvc",
+			initsys: mgr,
+		}
+		require.NoError(t, svc.SetEnvironment(ctx, env))
+		require.Equal(t, env, mgr.setEnv)
+		require.True(t, mgr.reloaded)
 	})
 
 	t.Run("env manager not supported", func(t *testing.T) {
@@ -415,9 +438,12 @@ func TestWithServiceTimeout(t *testing.T) {
 	})
 }
 
-// Ensure initsystem.ServiceEnvironmentManager is satisfied by types implementing it.
+// Ensure initsystem interfaces are satisfied by types implementing them.
 var _ initsystem.ServiceEnvironmentManager = (*mockEnvManager)(nil)
 var _ initsystem.ServiceManagerReloader = (*mockReloadEnvManager)(nil)
+var _ initsystem.ServiceEnvironmentSetter = (*mockEnvSetter)(nil)
+var _ initsystem.ServiceEnvironmentSetter = (*mockEnvSetterReloader)(nil)
+var _ initsystem.ServiceManagerReloader = (*mockEnvSetterReloader)(nil)
 var _ initsystem.ServiceManager = (*mockBasicManager)(nil)
 var _ initsystem.ServiceManager = (*mockLifecycleManager)(nil)
 var _ initsystem.ServiceManagerRestarter = (*mockNativeRestarter)(nil)
