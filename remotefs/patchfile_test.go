@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"net/http"
 	"path"
 	"testing"
 	"time"
@@ -57,10 +56,9 @@ func (f *patchFS) ReadDir(_ string) ([]fs.DirEntry, error) { panic("not implemen
 func (f *patchFS) OpenFile(_ string, _ int, _ fs.FileMode) (remotefs.File, error) {
 	panic("not implemented")
 }
-func (f *patchFS) Sha256(_ string) (string, error)                       { panic("not implemented") }
-func (f *patchFS) DownloadURL(_, _ string) error                         { panic("not implemented") }
-func (f *patchFS) RoundTrip(_ *http.Request) (*http.Response, error)     { panic("not implemented") }
-func (f *patchFS) RemoveAll(_ string) error                              { panic("not implemented") }
+func (f *patchFS) Sha256(_ string) (string, error)  { panic("not implemented") }
+func (f *patchFS) DownloadURL(_, _ string) error    { panic("not implemented") }
+func (f *patchFS) RemoveAll(_ string) error         { panic("not implemented") }
 func (f *patchFS) Mkdir(_ string, _ fs.FileMode) error                   { panic("not implemented") }
 func (f *patchFS) MkdirTemp(_, _ string) (string, error)                 { panic("not implemented") }
 func (f *patchFS) FileExist(_ string) bool                               { panic("not implemented") }

@@ -18,7 +18,7 @@ type FS interface {
 	fs.ReadFileFS
 	fs.ReadDirFS
 	OS
-	HTTPTransport
+	Downloader
 	Opener
 	Sha256summer
 }
@@ -72,6 +72,11 @@ type OS interface { //nolint:interfacebloat // intentionally large interface
 	Reboot(ctx context.Context) error
 	NativePath(path string) string
 	ShellQuote(s string) string
+}
+
+// Downloader can download content from a URL to a file on the remote host.
+type Downloader interface {
+	DownloadURL(url, dst string) error
 }
 
 // Opener is a file opener interface, modeled after stdlib's OS package.

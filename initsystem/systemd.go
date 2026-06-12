@@ -78,7 +78,7 @@ func (i Systemd) ServiceIsRunning(ctx context.Context, h cmd.ContextRunner, s st
 
 // ServiceScriptPath returns the path to a service configuration file.
 func (i Systemd) ServiceScriptPath(ctx context.Context, h cmd.ContextRunner, s string) (string, error) {
-	out, err := h.ExecOutputContext(ctx, systemctlCmd("show", "-p", "FragmentPath", s+".service").Pipe("cut", `-d"="`, "-f2").String())
+	out, err := h.ExecOutputContext(ctx, systemctlCmd("show", "-p", "FragmentPath", s+".service").Pipe("cut", "-d=", "-f2").String())
 	if err != nil {
 		return "", fmt.Errorf("failed to get service %s script path: %w", s, err)
 	}

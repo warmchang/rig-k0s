@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/k0sproject/rig/v2/cmd"
@@ -79,6 +80,29 @@ func (c WinSCM) DisableService(ctx context.Context, h cmd.ContextRunner, s strin
 // ServiceIsRunning returns true if a service is running.
 func (c WinSCM) ServiceIsRunning(ctx context.Context, h cmd.ContextRunner, s string) bool {
 	return h.ExecContext(ctx, fmt.Sprintf("$ErrorActionPreference='Stop'\nif ((Get-Service %s -ErrorAction SilentlyContinue).Status -ne 'Running') { exit 1 }", ps.SingleQuote(s)), cmd.PS()) == nil
+}
+
+// SetServiceEnvironment sets environment variables for a Windows service via the registry.
+func (c WinSCM) SetServiceEnvironment(ctx context.Context, runner cmd.ContextRunner, s string, env map[string]string) error {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	entries := make([]string, len(keys))
+	for i, k := range keys {
+		entries[i] = ps.SingleQuote(k + "=" + env[k])
+	}
+	regPath := ps.SingleQuote(`HKLM:\SYSTEM\CurrentControlSet\Services\` + s)
+	script := fmt.Sprintf(
+		"$ErrorActionPreference='Stop'\nNew-ItemProperty -LiteralPath %s -Name 'Environment' -PropertyType MultiString -Value @(%s) -Force -ErrorAction Stop | Out-Null",
+		regPath,
+		strings.Join(entries, ","),
+	)
+	if err := runner.ExecContext(ctx, script, cmd.PS(), cmd.Sensitive()); err != nil {
+		return fmt.Errorf("failed to set environment for service %s: %w", s, err)
+	}
+	return nil
 }
 
 // RegisterWinSCM registers the WinSCM in a repository.

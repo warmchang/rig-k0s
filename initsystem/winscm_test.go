@@ -126,6 +126,27 @@ func TestWinSCMDisableService(t *testing.T) {
 	})
 }
 
+func TestWinSCMSetServiceEnvironment(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		mr := newWinRunner()
+		mr.AddCommandSuccess(rigtest.HasPrefix("powershell.exe"))
+		err := initsystem.WinSCM{}.SetServiceEnvironment(context.Background(), mr, "myservice", map[string]string{"FOO": "bar", "BAZ": "qux"})
+		require.NoError(t, err)
+		script := decodePSCmd(t, mr.LastCommand())
+		require.Contains(t, script, "New-ItemProperty")
+		require.Contains(t, script, `HKLM:\SYSTEM\CurrentControlSet\Services\myservice`)
+		require.Contains(t, script, "MultiString")
+		require.Contains(t, script, "FOO=bar")
+		require.Contains(t, script, "BAZ=qux")
+	})
+	t.Run("failure", func(t *testing.T) {
+		mr := newWinRunner()
+		mr.AddCommandFailure(rigtest.HasPrefix("powershell.exe"), errors.New("exit 1"))
+		err := initsystem.WinSCM{}.SetServiceEnvironment(context.Background(), mr, "myservice", map[string]string{"FOO": "bar"})
+		require.Error(t, err)
+	})
+}
+
 func TestWinSCMServiceIsRunning(t *testing.T) {
 	t.Run("running", func(t *testing.T) {
 		mr := newWinRunner()

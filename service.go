@@ -180,11 +180,10 @@ func (m *Service) IsRunning(ctx context.Context) bool {
 }
 
 var (
-	errLogReaderNotSupported    = errors.New("init system provider does not implement log reader")
-	errLogStreamerNotSupported  = errors.New("init system provider does not support log streaming")
-	errEnvManagerNotSupported   = errors.New("init system provider does not support service environment management")
-	errDaemonReloadNotSupported = errors.New("init system provider does not support daemon-reload")
-	errServiceFSNotAvailable    = errors.New("service has no filesystem access; use client.Service() instead of GetService()")
+	errLogReaderNotSupported   = errors.New("init system provider does not implement log reader")
+	errLogStreamerNotSupported = errors.New("init system provider does not support log streaming")
+	errEnvManagerNotSupported  = errors.New("init system provider does not support service environment management")
+	errServiceFSNotAvailable   = errors.New("service has no filesystem access; use client.Service() instead of GetService()")
 )
 
 // Logs returns latest log lines for the service.
@@ -227,6 +226,17 @@ func (m *Service) StreamLogs(ctx context.Context, w io.Writer) error {
 func (m *Service) SetEnvironment(ctx context.Context, env map[string]string) error {
 	ctx, cancel := withServiceTimeout(ctx)
 	defer cancel()
+	if setter, ok := m.initsys.(initsystem.ServiceEnvironmentSetter); ok {
+		if err := setter.SetServiceEnvironment(ctx, m.runner, m.name, env); err != nil {
+			return fmt.Errorf("set environment for service '%s': %w", m.name, err)
+		}
+		if reloader, ok := m.initsys.(initsystem.ServiceManagerReloader); ok {
+			if err := reloader.DaemonReload(ctx, m.runner); err != nil {
+				return fmt.Errorf("daemon-reload after setting environment for service '%s': %w", m.name, err)
+			}
+		}
+		return nil
+	}
 	envManager, ok := m.initsys.(initsystem.ServiceEnvironmentManager)
 	if !ok {
 		return errEnvManagerNotSupported
@@ -249,22 +259,6 @@ func (m *Service) SetEnvironment(ctx context.Context, env map[string]string) err
 		if err := reloader.DaemonReload(ctx, m.runner); err != nil {
 			return fmt.Errorf("daemon-reload after setting environment for service '%s': %w", m.name, err)
 		}
-	}
-	return nil
-}
-
-// DaemonReload triggers a daemon-reload on the init system, if supported. This is useful after
-// manually writing service unit files outside of rig. Enable and Disable call this automatically.
-// If ctx has no deadline, a 2-minute default timeout is applied.
-func (m *Service) DaemonReload(ctx context.Context) error {
-	ctx, cancel := withServiceTimeout(ctx)
-	defer cancel()
-	reloader, ok := m.initsys.(initsystem.ServiceManagerReloader)
-	if !ok {
-		return errDaemonReloadNotSupported
-	}
-	if err := reloader.DaemonReload(ctx, m.runner); err != nil {
-		return fmt.Errorf("daemon-reload: %w", err)
 	}
 	return nil
 }

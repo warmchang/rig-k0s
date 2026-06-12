@@ -3,7 +3,6 @@ package remotefs_test
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"io"
 	"io/fs"
@@ -275,37 +274,6 @@ func TestPosixChownTreeInt(t *testing.T) {
 	})
 }
 
-func TestPosixHTTPStatus(t *testing.T) {
-	t.Run("200", func(t *testing.T) {
-		mr := rigtest.NewMockRunner()
-		mr.AddCommandOutput(rigtest.Equal("command -v curl"), "/usr/bin/curl")
-		mr.AddCommandOutput(rigtest.Equal("command -v base64"), "/usr/bin/base64")
-		resp200 := base64.StdEncoding.EncodeToString([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-		mr.AddCommandOutput(rigtest.Contains("--http1.1"), resp200)
-		f := remotefs.NewPosixFS(mr)
-		code, err := remotefs.HTTPStatus(context.Background(), f, "http://example.com/health")
-		require.NoError(t, err)
-		require.Equal(t, 200, code)
-	})
-	t.Run("503", func(t *testing.T) {
-		mr := rigtest.NewMockRunner()
-		mr.AddCommandOutput(rigtest.Equal("command -v curl"), "/usr/bin/curl")
-		mr.AddCommandOutput(rigtest.Equal("command -v base64"), "/usr/bin/base64")
-		resp503 := base64.StdEncoding.EncodeToString([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
-		mr.AddCommandOutput(rigtest.Contains("--http1.1"), resp503)
-		f := remotefs.NewPosixFS(mr)
-		code, err := remotefs.HTTPStatus(context.Background(), f, "http://example.com/health")
-		require.NoError(t, err)
-		require.Equal(t, 503, code)
-	})
-	t.Run("curl unavailable", func(t *testing.T) {
-		mr := rigtest.NewMockRunner()
-		mr.AddCommandFailure(rigtest.Equal("command -v curl"), errors.New("not found"))
-		f := remotefs.NewPosixFS(mr)
-		_, err := remotefs.HTTPStatus(context.Background(), f, "http://example.com/health")
-		require.Error(t, err)
-	})
-}
 
 func TestPosixInitStat(t *testing.T) {
 	// initStat selects between GNU and BSD stat by inspecting stat's capabilities.

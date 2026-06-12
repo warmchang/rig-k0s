@@ -49,6 +49,12 @@ type ServiceEnvironmentManager interface {
 	ServiceEnvironmentContent(env map[string]string) string
 }
 
+// ServiceEnvironmentSetter is a servicemanager that can directly set environment variables for a
+// service without an intermediate file (e.g. Windows SCM via the registry).
+type ServiceEnvironmentSetter interface {
+	SetServiceEnvironment(ctx context.Context, h cmd.ContextRunner, s string, env map[string]string) error
+}
+
 var (
 	// DefaultRegistry is the default repository for init systems.
 	DefaultRegistry = sync.OnceValue(func() *Registry {
